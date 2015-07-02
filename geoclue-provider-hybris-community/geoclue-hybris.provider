@@ -1,0 +1,8 @@
+[Geoclue Provider]
+Name=Hybris
+Service=org.freedesktop.Geoclue.Providers.Hybris
+Path=/org/freedesktop/Geoclue/Providers/Hybris
+Requires=RequiresGPS
+Provides=ProvidesUpdates
+Accuracy=Detailed
+Interfaces=org.freedesktop.Geoclue;org.freedesktop.Geoclue.Position;org.freedesktop.Geoclue.Velocity;org.freedesktop.Geoclue.Satellite
