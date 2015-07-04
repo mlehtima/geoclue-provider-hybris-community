@@ -64,6 +64,10 @@ typedef struct {
     double last_latitude;
     double last_longitude;
     double last_speed;
+    int last_satellite_used;
+    int last_satellite_visible;
+    GArray *last_used_prn;
+    GPtrArray *last_sat_info;
     GeoclueAccuracy *last_accuracy;
     GeocluePositionFields last_pos_fields;
     GeoclueVelocityFields last_velo_fields;
@@ -113,15 +117,23 @@ get_gps_interface()
 
     if (!error)
     {
-        error = module->methods->open(module, GPS_HARDWARE_MODULE_ID, (struct hw_device_t **) &device);
+        syslog(LOG_INFO, "GPS device info\n id = %s\n name = %s\n author = %s\n",
+               module->id, module->name, module->author);
+        error = module->methods->open(module, GPS_HARDWARE_MODULE_ID,
+                                      (struct hw_device_t **) &device);
 
         if (!error)
         {
             interface = device->get_gps_interface(device);
         }
+        else
+        {
+            syslog(LOG_ERR, "Unable to get GPS interface\n");
+        }
     }
     else
     {
+        syslog(LOG_ERR, "GPS interface not found, terminating\n");
         exit(1);
     }
 
@@ -145,8 +157,10 @@ status_callback(GpsStatus* status)
         geoclue_hybris_update_status (hybris, GEOCLUE_STATUS_UNAVAILABLE);
         break;
         case GPS_STATUS_SESSION_BEGIN:
+        syslog(LOG_INFO, "GPS session started");
         break;
         case GPS_STATUS_SESSION_END:
+        syslog(LOG_INFO, "GPS session stopped");
         break;
         case GPS_STATUS_ENGINE_ON:
         geoclue_hybris_update_status (hybris, GEOCLUE_STATUS_ACQUIRING);
@@ -174,7 +188,42 @@ nmea_callback(GpsUtcTime timestamp, const char* nmea, int length)
 static void
 set_capabilities_callback(uint32_t capabilities)
 {
-    /* do nothing */
+    syslog(LOG_INFO, "GPS hal supported capabilities:");
+    int bitmask = capabilities;
+    int mask = 1;
+    while(bitmask)
+    {
+        switch (capabilities & mask)
+        {
+            case GPS_CAPABILITY_SCHEDULING:
+            syslog(LOG_INFO, "Scheduling");
+            break;
+            /** GPS supports MS-Based AGPS mode */
+            case GPS_CAPABILITY_MSB:
+            syslog(LOG_INFO, "MS-Based AGPS");
+            break;
+            /** GPS supports MS-Assisted AGPS mode */
+            case GPS_CAPABILITY_MSA:
+            syslog(LOG_INFO, "MS-Assisted AGPS");
+            break;
+            /** GPS supports single-shot fixes */
+            case GPS_CAPABILITY_SINGLE_SHOT:
+            syslog(LOG_INFO, "Single-shot fixes");
+            break;
+            /** GPS supports on demand time injection */
+            case GPS_CAPABILITY_ON_DEMAND_TIME:
+            syslog(LOG_INFO, "On demand time injection");
+            break;
+            /** GPS supports Geofencing  */
+            case GPS_CAPABILITY_GEOFENCING:
+            syslog(LOG_INFO, "Geofencing");
+            break;
+            default:
+            break;
+        }
+        bitmask &= ~mask;
+        mask <<= 1;
+    }
 }
 
 static void
@@ -256,6 +305,23 @@ static void
 geoclue_hybris_update_status (GeoclueHybris *hybris, GeoclueStatus status)
 {
     if (status != hybris->last_status) {
+        switch (status)
+        {
+            case GEOCLUE_STATUS_ACQUIRING:
+            syslog(LOG_INFO, "GPS acquiring location");
+            break;
+            case GEOCLUE_STATUS_AVAILABLE:
+            syslog(LOG_INFO, "GPS location acquired");
+            break;
+            case GEOCLUE_STATUS_UNAVAILABLE:
+            syslog(LOG_INFO, "GPS location unavailable");
+            break;
+            case GEOCLUE_STATUS_ERROR:
+            syslog(LOG_INFO, "GPS error");
+            break;
+            default:
+            break;
+        }
         hybris->last_status = status;
         /* make position and velocity invalid if no fix */
         if (status != GEOCLUE_STATUS_AVAILABLE) {
@@ -307,6 +373,7 @@ static void
 finalize (GObject *obj)
 {
     GeoclueHybris *hybris = GEOCLUE_HYBRIS (obj);
+    int i = 0;
 
     if (gps)
     {
@@ -314,6 +381,18 @@ finalize (GObject *obj)
         gps->cleanup();
         gps = NULL;
     }
+
+    if (hybris->last_used_prn->len) {
+        g_array_remove_range (hybris->last_used_prn, 0, hybris->last_used_prn->len);
+    }
+    if (hybris->last_sat_info->len) {
+        for (i = 0; i < hybris->last_sat_info->len; i++) {
+            g_value_array_free(g_ptr_array_index(hybris->last_sat_info, i));
+        }
+        g_ptr_array_remove_range (hybris->last_sat_info, 0, hybris->last_sat_info->len);
+    }
+    g_array_free (hybris->last_used_prn, TRUE);
+    g_ptr_array_free (hybris->last_sat_info, TRUE);
     geoclue_accuracy_free (hybris->last_accuracy);
     g_hash_table_destroy (hybris->connections);
 
@@ -349,15 +428,12 @@ geoclue_hybris_update_position (GeoclueHybris *hybris, GpsLocation* location)
     hybris->last_pos_fields |= (isnan (location->altitude)) ?
                              0 : GEOCLUE_POSITION_FIELDS_ALTITUDE;
 
-    GeoclueAccuracy *accuracy = geoclue_accuracy_new (GEOCLUE_ACCURACY_LEVEL_DETAILED, location->accuracy, location->accuracy);
     gc_iface_position_emit_position_changed
         (GC_IFACE_POSITION (hybris),
          GEOCLUE_POSITION_FIELDS_LATITUDE | GEOCLUE_POSITION_FIELDS_LONGITUDE | GEOCLUE_POSITION_FIELDS_ALTITUDE,
          (int)(location->timestamp/1000+0.5),
          location->latitude, location->longitude, location->altitude,
-         accuracy);
-
-    geoclue_accuracy_free (accuracy);
+         hybris->last_accuracy);
 }
 
 static gboolean
@@ -376,6 +452,7 @@ get_position (GcIfacePosition *gc,
     *latitude = hybris->last_latitude;
     *longitude = hybris->last_longitude;
     *altitude = hybris->last_altitude;
+
     return TRUE;
 }
 
@@ -430,7 +507,48 @@ get_velocity (GcIfaceVelocity       *gc,
 static void
 geoclue_hybris_update_satellites (GeoclueHybris *hybris, GpsSvStatus* sv_info)
 {
-    //TODO
+    int i = 0;
+    GValue val = G_VALUE_INIT;
+    g_value_init (&val, G_TYPE_INT);
+
+    if (hybris->last_sat_info->len) {
+        for (i = 0; i < hybris->last_sat_info->len; i++) {
+            g_value_array_free(g_ptr_array_index(hybris->last_sat_info, i));
+        }
+        g_ptr_array_remove_range (hybris->last_sat_info, 0, hybris->last_sat_info->len);
+    }
+    if (hybris->last_used_prn->len) {
+        g_array_remove_range (hybris->last_used_prn, 0, hybris->last_used_prn->len);
+    }
+
+    i = 0;
+    for(i=0; i < sv_info->num_svs; i++)
+    {
+        if (sv_info->used_in_fix_mask & (1 << (sv_info->sv_list[i].prn-1))) {
+            g_array_append_val (hybris->last_used_prn, sv_info->sv_list[i].prn);
+        }
+        GValueArray *sat = g_value_array_new (4);
+        g_value_set_int (&val, sv_info->sv_list[i].prn);
+        g_value_array_append (sat, &val);
+        g_value_set_int (&val, sv_info->sv_list[i].azimuth);
+        g_value_array_append (sat, &val);
+        g_value_set_int (&val, sv_info->sv_list[i].elevation);
+        g_value_array_append (sat, &val);
+        g_value_set_int (&val, sv_info->sv_list[i].snr);
+        g_value_array_append (sat, &val);
+        g_ptr_array_add (hybris->last_sat_info, sat);
+    }
+    g_value_unset (&val);
+
+    hybris->last_satellite_used = hybris->last_used_prn->len,
+    hybris->last_satellite_visible = sv_info->num_svs,
+
+    gc_iface_satellite_emit_satellite_changed (GC_IFACE_SATELLITE(hybris),
+        (int)(hybris->last_timestamp+0.5),
+        hybris->last_satellite_used,
+        hybris->last_satellite_visible,
+        hybris->last_used_prn,
+        hybris->last_sat_info);
 }
 
 static gboolean
@@ -442,7 +560,13 @@ get_satellite (GcIfaceSatellite *gc,
                GPtrArray       **sat_info,
                GError          **error)
 {
-    //TODO
+    *timestamp = (int)(hybris->last_timestamp+0.5);
+    *satellite_used =  hybris->last_satellite_used;
+    *satellite_visible = hybris->last_satellite_visible;
+    *used_prn = hybris->last_used_prn;
+    *sat_info = hybris->last_sat_info;
+
+    return TRUE;
 }
 
 static gboolean
@@ -454,7 +578,13 @@ get_last_satellite (GcIfaceSatellite *gc,
                     GPtrArray       **sat_info,
                     GError          **error)
 {
-    //TODO
+    *timestamp = (int)(hybris->last_timestamp+0.5);
+    *satellite_used =  hybris->last_satellite_used;
+    *satellite_visible = hybris->last_satellite_visible;
+    *used_prn = hybris->last_used_prn;
+    *sat_info = hybris->last_sat_info;
+
+    return TRUE;
 }
 
 /* Geoclue interface */
@@ -491,6 +621,9 @@ add_reference (GcIfaceGeoclue        *gc,
     if (!pcount) {
         pcount = g_malloc0 (sizeof (int));
         g_hash_table_insert (hybris->connections, sender, pcount);
+    }
+    else {
+        free(sender);
     }
     (*pcount)++;
     if (g_hash_table_size (hybris->connections) == 1 && *pcount == 1) {
@@ -546,6 +679,7 @@ geoclue_hybris_init (GeoclueHybris *hybris)
                             "/org/freedesktop/Geoclue/Providers/Hybris",
                             "Hybris", "Hybris GPS provider");
 
+    struct timeval tv;
     int initok = 0;
     hybris->last_accuracy = geoclue_accuracy_new (GEOCLUE_ACCURACY_LEVEL_NONE, 0, 0);
     hybris->last_latitude = 1.0;
@@ -559,6 +693,11 @@ geoclue_hybris_init (GeoclueHybris *hybris)
     hybris->connections = g_hash_table_new_full (g_str_hash, g_str_equal,
                                                  g_free, g_free);
 
+    hybris->last_satellite_used = 0;
+    hybris->last_satellite_visible = 0;
+    hybris->last_sat_info = g_ptr_array_new ();
+    hybris->last_used_prn = g_array_new (FALSE, FALSE, sizeof (gint));
+
     gps = get_gps_interface();
 
     initok = gps->init(&callbacks);
@@ -570,6 +709,10 @@ geoclue_hybris_init (GeoclueHybris *hybris)
     else
         gps->set_position_mode(GPS_POSITION_MODE_STANDALONE,
                                GPS_POSITION_RECURRENCE_PERIODIC, 1000, 0, 0);
+
+    /* help gps by injecting time information */
+    gettimeofday(&tv, NULL);
+    gps->inject_time(tv.tv_sec, tv.tv_sec, 0);
 
     geoclue_hybris_update_status (hybris, GEOCLUE_STATUS_ACQUIRING);
 }
@@ -597,9 +740,8 @@ geoclue_hybris_velocity_init (GcIfaceVelocityClass *iface)
 static void
 geoclue_hybris_satellite_init (GcIfaceSatelliteClass *iface)
 {
-    //TODO
-    //iface->get_satellite = get_satellite;
-    //iface->get_last_satellite = get_last_satellite;
+    iface->get_satellite = get_satellite;
+    iface->get_last_satellite = get_last_satellite;
 }
 
 int
