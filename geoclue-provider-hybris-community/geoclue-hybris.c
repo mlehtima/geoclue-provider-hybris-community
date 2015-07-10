@@ -73,6 +73,7 @@ typedef struct {
     GeoclueVelocityFields last_velo_fields;
     GeoclueStatus last_status;
     GHashTable *connections;
+    DBusConnection *conn;
 } GeoclueHybris;
 
 typedef struct {
@@ -158,9 +159,11 @@ status_callback(GpsStatus* status)
         break;
         case GPS_STATUS_SESSION_BEGIN:
         syslog(LOG_INFO, "GPS session started");
+        geoclue_hybris_update_status (hybris, GEOCLUE_STATUS_ACQUIRING);
         break;
         case GPS_STATUS_SESSION_END:
         syslog(LOG_INFO, "GPS session stopped");
+        geoclue_hybris_update_status (hybris, GEOCLUE_STATUS_UNAVAILABLE);
         break;
         case GPS_STATUS_ENGINE_ON:
         geoclue_hybris_update_status (hybris, GEOCLUE_STATUS_ACQUIRING);
@@ -375,8 +378,7 @@ finalize (GObject *obj)
     GeoclueHybris *hybris = GEOCLUE_HYBRIS (obj);
     int i = 0;
 
-    if (gps)
-    {
+    if (gps) {
         gps->stop();
         gps->cleanup();
         gps = NULL;
@@ -392,9 +394,15 @@ finalize (GObject *obj)
         g_ptr_array_remove_range (hybris->last_sat_info, 0, hybris->last_sat_info->len);
     }
     g_array_free (hybris->last_used_prn, TRUE);
+    hybris->last_used_prn = NULL;
     g_ptr_array_free (hybris->last_sat_info, TRUE);
+    hybris->last_sat_info = NULL;
     geoclue_accuracy_free (hybris->last_accuracy);
+    hybris->last_accuracy = NULL;
     g_hash_table_destroy (hybris->connections);
+    hybris->connections = NULL;
+    free(hybris->owner);
+    hybris->owner = NULL;
 
     ((GObjectClass *) geoclue_hybris_parent_class)->finalize (obj);
 }
@@ -404,6 +412,9 @@ finalize (GObject *obj)
 static void
 geoclue_hybris_update_position (GeoclueHybris *hybris, GpsLocation* location)
 {
+    if (!hybris->last_accuracy) {
+        return;
+    }
     if (equal_or_nan (location->latitude, hybris->last_latitude) &&
         equal_or_nan (location->longitude, hybris->last_longitude) &&
         equal_or_nan (location->altitude, hybris->last_altitude)) {
@@ -446,6 +457,9 @@ get_position (GcIfacePosition *gc,
               GeoclueAccuracy      **accuracy,
               GError               **error)
 {
+    if (!hybris->last_accuracy) {
+        return FALSE;
+    }
     *timestamp = (int)(hybris->last_timestamp+0.5);
     *fields =  hybris->last_pos_fields;
     *accuracy = geoclue_accuracy_copy (hybris->last_accuracy);
@@ -511,6 +525,10 @@ geoclue_hybris_update_satellites (GeoclueHybris *hybris, GpsSvStatus* sv_info)
     GValue val = G_VALUE_INIT;
     g_value_init (&val, G_TYPE_INT);
 
+    if (!hybris->last_sat_info || !hybris->last_used_prn) {
+        return;
+    }
+
     if (hybris->last_sat_info->len) {
         for (i = 0; i < hybris->last_sat_info->len; i++) {
             g_value_array_free(g_ptr_array_index(hybris->last_sat_info, i));
@@ -560,6 +578,9 @@ get_satellite (GcIfaceSatellite *gc,
                GPtrArray       **sat_info,
                GError          **error)
 {
+    if (!hybris->last_sat_info || !hybris->last_used_prn) {
+        return FALSE;
+    }
     *timestamp = (int)(hybris->last_timestamp+0.5);
     *satellite_used =  hybris->last_satellite_used;
     *satellite_visible = hybris->last_satellite_visible;
@@ -578,6 +599,9 @@ get_last_satellite (GcIfaceSatellite *gc,
                     GPtrArray       **sat_info,
                     GError          **error)
 {
+    if (!hybris->last_sat_info || !hybris->last_used_prn) {
+        return FALSE;
+    }
     *timestamp = (int)(hybris->last_timestamp+0.5);
     *satellite_used =  hybris->last_satellite_used;
     *satellite_visible = hybris->last_satellite_visible;
@@ -614,6 +638,8 @@ add_reference (GcIfaceGeoclue        *gc,
 {
     char *sender;
     int *pcount;
+    if (!hybris->connections)
+        return;
 
     /* Update the hash of open connections */
     sender = dbus_g_method_get_sender (context);
@@ -628,8 +654,8 @@ add_reference (GcIfaceGeoclue        *gc,
     (*pcount)++;
     if (g_hash_table_size (hybris->connections) == 1 && *pcount == 1) {
         hybris->owner = strdup(sender);
-        gps->start();
     }
+    dbus_g_method_return (context);
 }
 
 static void
@@ -638,10 +664,13 @@ remove_reference (GcIfaceGeoclue        *gc,
 {
     char *sender;
     int *pcount;
+    if (!hybris->connections)
+        return;
 
     sender = dbus_g_method_get_sender (context);
     pcount = g_hash_table_lookup (hybris->connections, sender);
     if (!pcount) {
+        free (sender);
         return;
     }
 
@@ -650,9 +679,89 @@ remove_reference (GcIfaceGeoclue        *gc,
         g_hash_table_remove (hybris->connections, sender);
     }
     if (g_hash_table_size (hybris->connections) == 0 || strcmp(sender, hybris->owner) == 0) {
-        finalize((GObject *)hybris);
+        gps->stop();
         g_main_loop_quit (hybris->loop);
     }
+    free (sender);
+    dbus_g_method_return (context);
+}
+
+static void
+process_property_name_value(DBusMessageIter *iter)
+{
+    const char *property;
+    gboolean state = 0;
+    DBusMessageIter sub;
+    dbus_message_iter_get_basic(iter, &property);
+    dbus_message_iter_next (iter);
+    if (strcmp(property, "Powered") == 0) {
+        if (dbus_message_iter_get_arg_type (iter) == DBUS_TYPE_VARIANT) {
+            dbus_message_iter_recurse(iter, &sub);
+        }
+        dbus_message_iter_get_basic(&sub, &state);
+        syslog(LOG_INFO, "GPS %s from settings", state ? "enabled" : "disabled");
+        if (state) {
+            gps->start();
+        }
+        else {
+            gps->stop();
+        }
+    }
+}
+
+static void
+process_property_message(DBusMessage *msg)
+{
+    DBusMessageIter main_iter;
+    DBusMessageIter iter;
+    dbus_message_iter_init (msg, &main_iter);
+
+    if (dbus_message_iter_get_arg_type (&main_iter) == DBUS_TYPE_ARRAY) {
+        dbus_message_iter_recurse(&main_iter, &iter);
+    }
+    else {
+        dbus_message_iter_init (msg, &iter);
+    }
+    do {
+        if (dbus_message_iter_get_arg_type (&iter) == DBUS_TYPE_DICT_ENTRY) {
+            DBusMessageIter dict_iter;
+            dbus_message_iter_recurse(&iter, &dict_iter);
+            process_property_name_value(&dict_iter);
+        }
+        else {
+            process_property_name_value(&iter);
+        }
+    }
+    while (dbus_message_iter_next(&iter));
+}
+
+static DBusHandlerResult
+property_changed_signal(DBusConnection *connection,
+                        DBusMessage *msg, void *user_data)
+{
+    if (dbus_message_is_signal(msg, "net.connman.Technology",
+                               "PropertyChanged")) {
+        process_property_message(msg);
+    }
+    return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
+}
+
+static void
+get_properties_cb (DBusPendingCall *pc, gpointer data)
+{
+    DBusMessage *message = dbus_pending_call_steal_reply (pc);
+
+    if (dbus_message_get_type (message) == DBUS_MESSAGE_TYPE_ERROR) {
+        syslog(LOG_ERR, "No reply from DBus");
+        //finalize((GObject *)hybris);
+        g_main_loop_quit (hybris->loop);
+    }
+    else {
+        process_property_message(message);
+    }
+
+    dbus_message_unref (message);
+    dbus_pending_call_unref (pc);
 }
 
 /* Initialization */
@@ -660,15 +769,15 @@ remove_reference (GcIfaceGeoclue        *gc,
 static void
 geoclue_hybris_class_init (GeoclueHybrisClass *klass)
 {
-    GcProviderClass *p_class = (GcProviderClass *)klass;
     GObjectClass *o_class = (GObjectClass *)klass;
+    GcProviderClass *p_class = (GcProviderClass *)klass;
 
     o_class->finalize = finalize;
+    o_class->dispose = geoclue_hybris_dispose;
+
     p_class->shutdown = shutdown;
     p_class->set_options = set_options;
     p_class->get_status = geoclue_hybris_get_status;
-
-    o_class->dispose = geoclue_hybris_dispose;
 }
 
 static void
@@ -680,6 +789,9 @@ geoclue_hybris_init (GeoclueHybris *hybris)
                             "Hybris", "Hybris GPS provider");
 
     struct timeval tv;
+    DBusError error;
+    DBusMessage *methodcall;
+    DBusPendingCall *pending;
     int initok = 0;
     hybris->last_accuracy = geoclue_accuracy_new (GEOCLUE_ACCURACY_LEVEL_NONE, 0, 0);
     hybris->last_latitude = 1.0;
@@ -698,6 +810,29 @@ geoclue_hybris_init (GeoclueHybris *hybris)
     hybris->last_sat_info = g_ptr_array_new ();
     hybris->last_used_prn = g_array_new (FALSE, FALSE, sizeof (gint));
 
+    dbus_error_init(&error);
+
+    hybris->conn = dbus_bus_get(DBUS_BUS_SYSTEM, &error);
+
+    if (dbus_error_is_set(&error)) {
+        syslog(LOG_ERR, "Cannot get System BUS connection: %s", error.message);
+        dbus_error_free(&error);
+        g_main_loop_quit (hybris->loop);
+    }
+    dbus_connection_setup_with_g_main(hybris->conn, NULL);
+
+    char *rule = "type='signal',interface='net.connman.Technology',path='/net/connman/technology/gps',member='PropertyChanged'";
+    dbus_bus_add_match(hybris->conn, rule, &error);
+
+    if (dbus_error_is_set(&error)) {
+        syslog(LOG_ERR, "Cannot add D-BUS match rule, cause: %s", error.message);
+        dbus_error_free(&error);
+        g_main_loop_quit (hybris->loop);
+    }
+    dbus_error_free(&error);
+
+    dbus_connection_add_filter(hybris->conn, property_changed_signal, NULL, NULL);
+
     gps = get_gps_interface();
 
     initok = gps->init(&callbacks);
@@ -714,7 +849,32 @@ geoclue_hybris_init (GeoclueHybris *hybris)
     gettimeofday(&tv, NULL);
     gps->inject_time(tv.tv_sec, tv.tv_sec, 0);
 
-    geoclue_hybris_update_status (hybris, GEOCLUE_STATUS_ACQUIRING);
+    geoclue_hybris_update_status (hybris, GEOCLUE_STATUS_UNAVAILABLE);
+
+    /* get connman gps properties to check whether gps is enabled */
+    methodcall = dbus_message_new_method_call("net.connman",
+                                              "/net/connman/technology/gps",
+                                              "net.connman.Technology",
+                                              "GetProperties");
+
+    if (methodcall == NULL) {
+        syslog(LOG_ERR, "Cannot allocate DBus message!\n");
+    }
+    /* now do a sync call and expect reply using pending call object */
+    if (!dbus_connection_send_with_reply(hybris->conn, methodcall, &pending, -1)) {
+        syslog(LOG_ERR, "Failed to send DBus message!\n");
+    }
+    dbus_connection_flush(hybris->conn);
+    dbus_message_unref(methodcall);
+    methodcall = NULL;
+
+    if (dbus_pending_call_get_completed (pending)) {
+        get_properties_cb (pending, NULL);
+    }
+
+    if (!dbus_pending_call_set_notify (pending, get_properties_cb, NULL, NULL)) {
+        syslog(LOG_ERR, "Out of memory");
+    }
 }
 
 static void
@@ -756,6 +916,8 @@ main()
 
     g_main_loop_unref (hybris->loop);
     g_object_unref (hybris);
+
+    syslog(LOG_INFO, "Terminated successfully");
 
     return 0;
 }
