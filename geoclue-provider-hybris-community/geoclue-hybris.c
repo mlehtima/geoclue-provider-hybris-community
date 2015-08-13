@@ -349,7 +349,7 @@ geoclue_hybris_get_status (GcIfaceGeoclue *iface,
 }
 
 static gboolean
-set_options (GcIfaceGeoclue *gc,
+geoclue_hybris_set_options (GcIfaceGeoclue *gc,
              GHashTable     *options,
              GError        **error)
 {
@@ -359,7 +359,7 @@ set_options (GcIfaceGeoclue *gc,
 /* Deinitialization */
 
 static void
-shutdown (GcProvider *provider)
+geoclue_hybris_shutdown (GcProvider *provider)
 {
     GeoclueHybris *hybris = GEOCLUE_HYBRIS (provider);
 
@@ -373,7 +373,7 @@ geoclue_hybris_dispose (GObject *obj)
 }
 
 static void
-finalize (GObject *obj)
+geoclue_hybris_finalize (GObject *obj)
 {
     GeoclueHybris *hybris = GEOCLUE_HYBRIS (obj);
     int i = 0;
@@ -448,7 +448,7 @@ geoclue_hybris_update_position (GeoclueHybris *hybris, GpsLocation* location)
 }
 
 static gboolean
-get_position (GcIfacePosition *gc,
+geoclue_hybris_get_position (GcIfacePosition *gc,
               GeocluePositionFields *fields,
               int                   *timestamp,
               double                *latitude,
@@ -497,7 +497,7 @@ geoclue_hybris_update_velocity (GeoclueHybris *hybris, GpsLocation* location)
 }
 
 static gboolean
-get_velocity (GcIfaceVelocity       *gc,
+geoclue_hybris_get_velocity (GcIfaceVelocity       *gc,
               GeoclueVelocityFields *fields,
               int                   *timestamp,
               double                *speed,
@@ -570,7 +570,7 @@ geoclue_hybris_update_satellites (GeoclueHybris *hybris, GpsSvStatus* sv_info)
 }
 
 static gboolean
-get_satellite (GcIfaceSatellite *gc,
+geoclue_hybris_get_satellite (GcIfaceSatellite *gc,
                int              *timestamp,
                int              *satellite_used,
                int              *satellite_visible,
@@ -591,7 +591,7 @@ get_satellite (GcIfaceSatellite *gc,
 }
 
 static gboolean
-get_last_satellite (GcIfaceSatellite *gc,
+geoclue_hybris_get_last_satellite (GcIfaceSatellite *gc,
                     int              *timestamp,
                     int              *satellite_used,
                     int              *satellite_visible,
@@ -614,7 +614,7 @@ get_last_satellite (GcIfaceSatellite *gc,
 /* Geoclue interface */
 
 static gboolean
-get_provider_info (GcIfaceGeoclue  *gc,
+geoclue_hybris_get_provider_info (GcIfaceGeoclue  *gc,
                    gchar          **name,
                    gchar          **description,
                    GError         **error)
@@ -633,7 +633,7 @@ get_provider_info (GcIfaceGeoclue  *gc,
 }
 
 static void
-add_reference (GcIfaceGeoclue        *gc,
+geoclue_hybris_add_reference (GcIfaceGeoclue        *gc,
                DBusGMethodInvocation *context)
 {
     char *sender;
@@ -659,7 +659,7 @@ add_reference (GcIfaceGeoclue        *gc,
 }
 
 static void
-remove_reference (GcIfaceGeoclue        *gc,
+geoclue_hybris_remove_reference (GcIfaceGeoclue        *gc,
                   DBusGMethodInvocation *context)
 {
     char *sender;
@@ -772,11 +772,11 @@ geoclue_hybris_class_init (GeoclueHybrisClass *klass)
     GObjectClass *o_class = (GObjectClass *)klass;
     GcProviderClass *p_class = (GcProviderClass *)klass;
 
-    o_class->finalize = finalize;
+    o_class->finalize = geoclue_hybris_finalize;
     o_class->dispose = geoclue_hybris_dispose;
 
-    p_class->shutdown = shutdown;
-    p_class->set_options = set_options;
+    p_class->shutdown = geoclue_hybris_shutdown;
+    p_class->set_options = geoclue_hybris_set_options;
     p_class->get_status = geoclue_hybris_get_status;
 }
 
@@ -838,12 +838,8 @@ geoclue_hybris_init (GeoclueHybris *hybris)
     initok = gps->init(&callbacks);
 
     /* need to be done before starting gps or no info will come out */
-    if (!initok)
-        gps->set_position_mode(GPS_POSITION_MODE_MS_BASED,
-                               GPS_POSITION_RECURRENCE_PERIODIC, 1000, 0, 0);
-    else
-        gps->set_position_mode(GPS_POSITION_MODE_STANDALONE,
-                               GPS_POSITION_RECURRENCE_PERIODIC, 1000, 0, 0);
+    gps->set_position_mode(GPS_POSITION_MODE_STANDALONE,
+                           GPS_POSITION_RECURRENCE_PERIODIC, 1000, 0, 0);
 
     /* help gps by injecting time information */
     gettimeofday(&tv, NULL);
@@ -880,28 +876,28 @@ geoclue_hybris_init (GeoclueHybris *hybris)
 static void
 geoclue_hybris_geoclue_init (GcIfaceGeoclueClass *iface)
 {
-    iface->get_provider_info = get_provider_info;
-    iface->add_reference = add_reference;
-    iface->remove_reference = remove_reference;
+    iface->get_provider_info = geoclue_hybris_get_provider_info;
+    iface->add_reference = geoclue_hybris_add_reference;
+    iface->remove_reference = geoclue_hybris_remove_reference;
 }
 
 static void
 geoclue_hybris_position_init (GcIfacePositionClass *iface)
 {
-    iface->get_position = get_position;
+    iface->get_position = geoclue_hybris_get_position;
 }
 
 static void
 geoclue_hybris_velocity_init (GcIfaceVelocityClass *iface)
 {
-    iface->get_velocity = get_velocity;
+    iface->get_velocity = geoclue_hybris_get_velocity;
 }
 
 static void
 geoclue_hybris_satellite_init (GcIfaceSatelliteClass *iface)
 {
-    iface->get_satellite = get_satellite;
-    iface->get_last_satellite = get_last_satellite;
+    iface->get_satellite = geoclue_hybris_get_satellite;
+    iface->get_last_satellite = geoclue_hybris_get_last_satellite;
 }
 
 int
