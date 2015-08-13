@@ -884,12 +884,8 @@ geoclue_hybris_init (GeoclueHybris *hybris)
     initok = gps->init(&callbacks);
 
     /* need to be done before starting gps or no info will come out */
-    if (!initok)
-        gps->set_position_mode(GPS_POSITION_MODE_MS_BASED,
-                               GPS_POSITION_RECURRENCE_PERIODIC, 1000, 0, 0);
-    else
-        gps->set_position_mode(GPS_POSITION_MODE_STANDALONE,
-                               GPS_POSITION_RECURRENCE_PERIODIC, 1000, 0, 0);
+    gps->set_position_mode(GPS_POSITION_MODE_STANDALONE,
+                           GPS_POSITION_RECURRENCE_PERIODIC, 1000, 0, 0);
 
     /* help gps by injecting time information */
     gettimeofday(&tv, NULL);
