@@ -217,10 +217,12 @@ set_capabilities_callback(uint32_t capabilities)
             case GPS_CAPABILITY_ON_DEMAND_TIME:
             syslog(LOG_INFO, "On demand time injection");
             break;
+#if ANDROID_VERSION_MAJOR>=5
             /** GPS supports Geofencing  */
             case GPS_CAPABILITY_GEOFENCING:
             syslog(LOG_INFO, "Geofencing");
             break;
+#endif
             default:
             break;
         }
